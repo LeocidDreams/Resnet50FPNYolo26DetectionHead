@@ -1,0 +1,17 @@
+__pycache__/
+__pycache__/*
+
+attempts/
+attempts/*
+
+dataset/
+dataset/*
+
+pytorchForDummies/
+pytorchForDummies/*
+
+ResYOLO/
+ResYOLO/*
+
+
+training.py
