@@ -1,1 +1,1 @@
-Yolo detection head is very sophisticated.I couldn't overcome these problem.
+
