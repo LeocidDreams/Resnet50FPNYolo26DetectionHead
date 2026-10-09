@@ -1,156 +1,220 @@
+# ResNet50 + YOLO26 OBB (Oriented Bounding Box) Model
 
-Here is a professional, comprehensive `README.md` tailored for your **ResNet50-FPN with YOLO Detection Head** repository:
-
-```markdown
-# ResNet50-FPN with YOLO Detection Head
-
-A modular object detection framework combining a **ResNet-50 backbone**, a **Feature Pyramid Network (FPN)** for multi-scale feature aggregation, and a high-performance **YOLO-style decoupled detection head**. Designed for high accuracy, efficient multi-scale feature representation, and robust bounding box localization.
+A hybrid PyTorch architecture combining an ImageNet-pretrained **ResNet-50 backbone**, PyTorch **Feature Pyramid Network (FPN)** neck, and Ultralytics **OBB26 detection head** for oriented object detection tasks (e.g., aerial imagery, rotated document detection, or industrial inspection).
 
 ---
 
-## 🏗️ Architecture Overview
-
+## Architecture Overview
 
 ```
-
-Input Image (H x W x 3)
-│
-▼
-┌──────────────┐
-│  ResNet-50   │ ──> Extract multi-scale feature maps (C3, C4, C5)
-└──────┬───────┘
-│
-▼
-┌──────────────┐
-│     FPN      │ ──> Top-down & bottom-up pathway feature fusion (P3, P4, P5)
-└──────┬───────┘
-│
-▼
-┌──────────────┐
-│ YOLO Detect  │ ──> Decoupled classification & bounding box regression heads
-│    Head      │     (Anchor-free / DFL / CIoU loss)
-└──────┬───────┘
-│
-▼
-Final Bounding Boxes & Class Probabilities
+Input Image (3 x H x W)
+       │
+┌──────▼───────────────────────────┐
+│  ResNet-50 Backbone              │
+│  - Stem (Conv1 + BN + ReLU + Pool)│
+│  - Layer1 (256 ch, stride 4)     │
+│  - Layer2 (512 ch, stride 8)     │
+│  - Layer3 (1024 ch, stride 16)   │
+│  - Layer4 (2048 ch, stride 32)   │
+└──────┬───────────────────────────┘
+       │ [Layer1, Layer2, Layer3, Layer4]
+┌──────▼───────────────────────────┐
+│  Feature Pyramid Network (FPN)   │
+│  - Out channels: 256             │
+└──────┬───────────────────────────┘
+       │ 4 x Feature Maps (256 ch each)
+┌──────▼───────────────────────────┐
+│  Ultralytics OBB26 Head          │
+│  - Strides: [4, 8, 16, 32]       │
+│  - Classes: 15                   │
+└──────┬───────────────────────────┘
+       │
+Output: Bounding Boxes (x, y, w, h, angle) + Class Scores
 
 ```
 
 ---
 
-## 🚀 Key Features
+## Features
 
-- **Robust Backbone:** Leverages pre-trained ResNet-50 weights from `torchvision` for strong transfer learning capabilities across diverse vision tasks.
-- **Multi-Scale Feature Pyramid (FPN):** Seamlessly fuses low-level spatial details with high-level semantic features across multiple pyramid scales (`P3`, `P4`, `P5`).
-- **State-of-the-Art YOLO Detection Head:** Implements a decoupled head architecture that separates box regression and classification branches, boosting training convergence speed and localization precision.
-- **Modular Codebase:** Clean, object-oriented PyTorch implementation making it simple to swap backbones, alter FPN channel depths, or customize loss functions.
-
----
-
-## 📦 Project Structure
-
-```text
-Resnet50FPNYolo26DetectionHead/
-│
-├── backbone/
-│   └── resnet.py          # ResNet-50 feature extractor wrapper
-├── neck/
-│   └── fpn.py             # Feature Pyramid Network implementation
-├── head/
-│   └── yolo_head.py       # YOLO decoupled detection head & prediction layers
-├── models/
-│   └── detector.py        # End-to-end model assembly (Backbone + FPN + Head)
-├── utils/
-│   └── losses.py          # CIoU loss, Distribution Focal Loss (DFL)
-├── train.py               # Training pipeline script
-├── inference.py           # Inference & evaluation script
-├── requirements.txt       # Python dependencies
-└── README.md
-
-```
+* **Custom Backbone Support**: Replaces standard CSPDarknet backbones with a pre-trained ResNet-50.
+* **Multi-Scale Feature Fusion**: Uses `torchvision.ops.FeaturePyramidNetwork` to generate multi-scale representations across 4 feature levels.
+* **Oriented Object Detection**: Integrated with Ultralytics `OBB26` head to detect rotated boxes (`x, y, w, h, angle`).
+* **Custom Loss Adapter**: Includes `YOLOLossMock` to bridge custom PyTorch network output directly with Ultralytics `v8OBBLoss` task-aligned assigners.
 
 ---
 
-## 🛠️ Installation
+## Setup & Installation
 
-1. **Clone the repository:**
+### Dependencies
+
 ```bash
-git clone [https://github.com/LeocidDreams/Resnet50FPNYolo26DetectionHead.git](https://github.com/LeocidDreams/Resnet50FPNYolo26DetectionHead.git)
-cd Resnet50FPNYolo26DetectionHead
+pip install torch torchvision ultralytics numpy pandas tqdm
 
 ```
-
-
-2. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-
-```
-
-
 
 ---
 
-## ⚙️ Quick Start
+## Implementation Details
 
-### 1. Initialize the Model
+### Model Definition (`model.py`)
 
 ```python
+from collections import OrderedDict
 import torch
-from models.detector import ResNet50FPNYolo
+import torch.nn as nn
+import torchvision.models as models
+from torchvision.ops import FeaturePyramidNetwork
+from ultralytics.nn.modules.head import OBB26
 
-# Instantiate model for 80 object classes (e.g., COCO dataset)
-model = ResNet50FPNYolo(num_classes=80, pretrained_backbone=True)
+class Resnet50Yolo26(nn.Module):
+    def __init__(self, num_classes: int = 15):
+        super(Resnet50Yolo26, self).__init__()
+
+        # ResNet-50 Backbone
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4
+
+        # FPN Neck
+        in_channels = [256, 512, 1024, 2048]
+        self.fpn = FeaturePyramidNetwork(in_channels_list=in_channels, out_channels=256)
+
+        # Ultralytics OBB Head
+        self.detectionHead = OBB26(
+            nc=num_classes,
+            end2end=False,
+            ch=(256, 256, 256, 256)
+        )
+        
+        # Downsampling strides matching stem + layers (P2, P3, P4, P5)
+        self.detectionHead.stride = torch.tensor([4.0, 8.0, 16.0, 32.0])
+
+    def forward(self, x: torch.Tensor):
+        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+        l1 = self.layer1(x)
+        l2 = self.layer2(l1)
+        l3 = self.layer3(l2)
+        l4 = self.layer4(l3)
+
+        features = OrderedDict([
+            ('layer1', l1),
+            ('layer2', l2),
+            ('layer3', l3),
+            ('layer4', l4)
+        ])
+
+        fpn_outputs = list(self.fpn(features).values())
+        return self.detectionHead(fpn_outputs)
+
+```
+
+---
+
+## Usage
+
+### Training Loop Example
+
+```python
+from types import SimpleNamespace
+import torch
+from torch.optim import Adam
+from ultralytics.utils.loss import v8OBBLoss
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# 1. Initialize Model
+model = Resnet50Yolo26(num_classes=15).to(device)
+
+# 2. Mock Loss Wrapper for Ultralytics Loss Integration
+class YOLOLossMock(torch.nn.Module):
+    def __init__(self, obb_head):
+        super().__init__()
+        self.model = torch.nn.ModuleList([obb_head])
+        self.stride = obb_head.stride
+        self.nc = obb_head.nc
+        self.no = obb_head.no
+        self.args = getattr(obb_head, 'args', {})
+
+mock_yolo_model = YOLOLossMock(model.detectionHead)
+
+# 3. Configure Loss Function & Hyperparameters
+criterion = v8OBBLoss(model=mock_yolo_model, tal_topk=10)
+criterion.hyp = SimpleNamespace(
+    box=7.5,
+    cls=0.5,
+    dfl=1.5,
+    angle=1.06
+)
+
+optimizer = Adam(model.parameters(), lr=1e-4)
+
+# 4. Step Training Iteration
+model.train()
+for data, targets in trainDataLoader:
+    data = data.to(device)
+    
+    # Forward Pass
+    preds = model(data)
+
+    # Format targets for v8OBBLoss: [batch_idx, cls, x, y, w, h, angle]
+    batch_labels = []
+    for batch_idx, target_dict in enumerate(targets):
+        cls = target_dict["cls"].float().unsqueeze(1)
+        bboxes = target_dict["bboxes"].float() # Shape: (N, 5) -> x, y, w, h, angle
+        batch_idx_col = torch.full((len(cls), 1), batch_idx, device=device)
+        batch_labels.append(torch.cat([batch_idx_col, cls, bboxes], dim=1))
+
+    all_targets = torch.cat(batch_labels, dim=0)
+    loss_target = {
+        "cls": all_targets[:, 1],
+        "bboxes": all_targets[:, 2:],
+        "batch_idx": all_targets[:, 0],
+        "train_targets": all_targets
+    }
+
+    # Backward Pass
+    loss_tuple, _ = criterion(preds, loss_target)
+    total_loss = loss_tuple.sum()
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+
+```
+
+### Evaluation / Inference Example
+
+```python
 model.eval()
+with torch.no_grad():
+    for data, _ in testDataLoader:
+        data = data.to(device)
+        outputs = model(data)
 
-# Dummy input image batch (Batch Size: 2, Channels: 3, Height: 640, Width: 640)
-x = torch.randn(2, 3, 640, 640)
-
-# Forward pass
-outputs = model(x)
-print("Forward pass successful! Feature pyramids and head outputs generated.")
-
-```
-
-### 2. Running Inference
-
-```bash
-python inference.py --weights path/to/checkpoint.pth --source path/to/images/ --conf 0.25
-
-```
-
-### 3. Training
-
-```bash
-python train.py --data config/dataset.yaml --epochs 100 --batch-size 16 --lr 0.01
+        # In eval mode, outputs[0] contains formatted predictions
+        if isinstance(outputs, tuple):
+            predictions = outputs[0]
+            scores = predictions[..., 4]
+            print(f"Mean Confidence: {scores.mean().item():.4f}")
+            print(f"Max Confidence:  {scores.max().item():.4f}")
 
 ```
 
 ---
 
-## 📈 Configuration & Hyperparameters
+## Expected Target Data Format
 
-| Component | Default Setting | Description |
-| --- | --- | --- |
-| **Backbone** | ResNet-50 | PyTorch torchvision weights (`ResNet50_Weights.DEFAULT`) |
-| **FPN Channels** | 256 | Output channel dimension across all pyramid levels |
-| **Input Image Size** | 640 x 640 | Standard multi-scale training resolution |
-| **Loss Functions** | CIoU + BCE + DFL | Complete IoU for boxes, Binary Cross-Entropy for classes, DFL for distribution |
+During training, dataset bounding boxes provided inside `targets` must be oriented bounding boxes with **5 parameters**:
 
----
+$$\text{bbox} = [x_{\text{center}}, y_{\text{center}}, \text{width}, \text{height}, \text{angle}]$$
 
-## 🤝 Contributing
-
-Contributions, feature requests, and bug reports are welcome! Feel free to open an issue or submit a pull request.
-
----
-
-## 📜 License
-
-Distributed under the [MIT License](https://www.google.com/search?q=LICENSE).
-
-```
-
-<FollowUp label="Want me to write the core Python code implementation for the YOLO detection head and FPN modules?" query="Can you provide the core Python code implementation for the FPN neck and YOLO detection head modules for this repository?"/>
-
-```
+* **$x, y$**: Center coordinates normalized relative to image resolution.
+* **$w, h$**: Width and height normalized relative to image resolution.
+* **$\text{angle}$**: Angle in radians or degrees matching standard `v8OBBLoss` expectations.
